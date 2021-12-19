@@ -196,60 +196,61 @@ def train(clf, train_loader, valid_loader, args):
 
     log_file = os.path.join(log_path, args.log_dir + "_log.txt")
     print_parameters(args, log_file)
-
+        
+    device = next(clf.parameters()).device
     hist = {'loss':[], 'acc':[], 'val_loss':[], 'val_acc':[]}
-    n_batches = tf.data.experimental.cardinality(train_loader).numpy()
     best_loss, counter = 1e12, 1
     for epoch in range(args.n_epochs):
 
         ## Training
         desc = "Epoch[%3d/%3d]" % (epoch+1, args.n_epochs)
-        with tqdm(train_loader, total=n_batches, ncols=100,
+        with tqdm(train_loader, total=len(train_loader), ncols=100,
                 file=sys.stdout, ascii=True, leave=False) as pbar:
             pbar.set_description(desc)
 
-            clf.batch_loss.reset_states()
-            clf.batch_acc.reset_states()
-            for data in pbar:
-                clf.train_step(data)
-                loss = clf.batch_loss.result().numpy()
-                acc = clf.batch_acc.result().numpy()
-                pbar.set_postfix({'loss': "%.4f" % loss, 'acc': "%.4f" % acc})
+            loss, acc = np.asfarray([]), np.asfarray([])
+            for x, y in pbar:
+                data = x.to(device), y.to(device)
+                results = clf.train_step(data)
+                loss = np.append(loss, results['loss'].item())
+                acc = np.append(acc, results['acc'].item())
+                pbar.set_postfix({'loss': "%.4f" % loss.mean(), 'acc': "%.4f" % acc.mean()})
 
-            hist['loss'].append(loss)
-            hist['acc'].append(acc)
+            hist['loss'].append(loss.mean())
+            hist['acc'].append(acc.mean())
 
         ## Validation
-        clf.batch_loss.reset_states()
-        clf.batch_acc.reset_states()
-        for val_data in valid_loader:
-            clf.test_step(val_data)
-        val_loss = clf.batch_loss.result().numpy()
-        val_acc = clf.batch_acc.result().numpy()
+        clf.model.eval()
+        val_loss, val_acc = np.asfarray([]), np.asfarray([])
+        for x, y in valid_loader:
+            data = x.to(device), y.to(device)
+            results = clf.test_step(data)
+            val_loss = np.append(val_loss, results['loss'].item())
+            val_acc = np.append(val_acc, results['acc'].item())
 
-        hist['val_loss'].append(val_loss)
-        hist['val_acc'].append(val_acc)
-
-        if val_loss < best_loss and (best_loss - val_loss) > args.min_loss:
-            best_loss = val_loss
+        hist['val_loss'].append(val_loss.mean())
+        hist['val_acc'].append(val_acc.mean())
+        
+        if val_loss.mean() < best_loss and (best_loss - val_loss.mean()) > args.min_loss:
+            best_loss = val_loss.mean()
             best_epoch = epoch + 1
-            best_model = deepcopy(clf.model.get_weights())
+            best_model = deepcopy(clf.model.state_dict())
             counter = 1
         else:
             counter += 1
 
         ## Print log
         if (epoch + 1) % args.log_interval == 0 or args.early_stop:
-            desc += ": loss=%.4f, acc=%.4f" % (loss, acc)
-            desc += " - val_loss=%.4f, val_acc=%.4f (%d)" % (val_loss, val_acc, counter)
+            desc += ": loss=%.4f, acc=%.4f" % (loss.mean(), acc.mean())
+            desc += " - val_loss=%.4f, val_acc=%.4f (%d)" % (val_loss.mean(), val_acc.mean(), counter)
             print_log(desc, log_file)
 
-        ## Early stopping
+        ## Early stopping            
         if args.early_stop and counter == args.patience:
             print_log("Early stopped! (Best epoch=%d)" % best_epoch, log_file)
             break
 
-    clf.model.set_weights(best_model)
-    clf.model.save_weights(os.path.join(log_path, args.log_dir + "_weights.h5"))
+    clf.model.load_state_dict(best_model)
+    torch.save(best_model, os.path.join(log_path, args.log_dir + "_weights.pth"))
     return hist
 ```
